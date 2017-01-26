@@ -7,7 +7,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.ByteBuffer;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Created by harbeck on 1/26/17.
@@ -23,6 +24,7 @@ import java.nio.ByteBuffer;
 public class VarianTV301 {
 
     Logger log = LogManager.getLogger(VarianTV301.class);
+    public int commError = 0;
 
     enum COMMODE {RS232, RS485}
 
@@ -37,23 +39,23 @@ public class VarianTV301 {
 
 
     // Definition of states
-    final int STATUS_STOP = 0;
-    final int STATUS_WAIT_INTERLOCK = 1;
-    final int STATUS_STARTING = 2;
-    final int STATUS_AUTO_TUNING = 3;
-    final int STATUS_BRAKING = 4;
-    final int STATUS_NORMAL = 5;
-    final int STATUS_FAIL = 6;
+    public static final int STATUS_STOP = 0;
+    public static final int STATUS_WAIT_INTERLOCK = 1;
+    public static final int STATUS_STARTING = 2;
+    public static final int STATUS_AUTO_TUNING = 3;
+    public static final int STATUS_BRAKING = 4;
+    public static final int STATUS_NORMAL = 5;
+    public static final int STATUS_FAIL = 6;
 
     // Definition of error more bits.
-    final int FAIL_NOCONNECT = 0x01 << 0;
-    final int FAIL_PUMP_OVERTEMP = 0x01 << 1;
-    final int FAIL_CONTRLOLLER_OVERTEMP = 0x01 << 2;
-    final int FAIL_POWER = 0x01 << 3;
-    final int FAIL_AUX = 0x01 << 4;
-    final int FAIL_OVERVOLTAGE = 0x01 << 5;
-    final int FAIL_OVERCURRENT = 0x01 << 6;
-    final int FAIL_HIGHLOAD = 0x01 << 7;
+    final static int FAIL_NOCONNECT = 0x01 << 0;
+    final static int FAIL_PUMP_OVERTEMP = 0x01 << 1;
+    final static int FAIL_CONTRLOLLER_OVERTEMP = 0x01 << 2;
+    final static int FAIL_POWER = 0x01 << 3;
+    final static int FAIL_AUX = 0x01 << 4;
+    final static int FAIL_OVERVOLTAGE = 0x01 << 5;
+    final static int FAIL_OVERCURRENT = 0x01 << 6;
+    final static int FAIL_HIGHLOAD = 0x01 << 7;
 
     // RS485 Address. For future use.
     int myAddress = 0;
@@ -66,6 +68,8 @@ public class VarianTV301 {
 
     COMMODE comMode = COMMODE.RS232;
 
+
+    Semaphore busy = new Semaphore(1);
 
     /**
      * Output stream to write to the pump controller
@@ -93,7 +97,7 @@ public class VarianTV301 {
      * @param out
      */
 
-    protected VarianTV301(InputStream in, OutputStream out) {
+    public VarianTV301(InputStream in, OutputStream out) {
         this.inStream = in;
         this.outStream = out;
     }
@@ -119,13 +123,32 @@ public class VarianTV301 {
     }
 
 
+
+    public boolean updateStatus (VarianStatus s) {
+        this.block();
+
+        s.ErrorStatus = this.getCurrentErrorStatus();
+        s.OpsStatus = this.getCurrentOperationStatus();
+        this.release();
+        if (commError == 0)
+            return true;
+
+        commError = 0;
+        return false;
+    }
+
     /**
      * Send the command to start the pump.
      */
 
     public boolean start_pump() {
+        boolean retVal = false;
+        this.block();
         writeBooleanMsg(100, true);
-        return acknowledge();
+        retVal =  acknowledge() || (commError > 0);
+        commError = 0;
+        this.release();
+        return retVal;
     }
 
 
@@ -134,8 +157,13 @@ public class VarianTV301 {
      */
 
     public boolean stop_pump() {
+        boolean retVal = false;
+        this.block();
         writeBooleanMsg(100, false);
-        return acknowledge();
+        retVal =  acknowledge() || (commError > 0);
+        commError = 0;
+        this.release();
+        return retVal;
     }
 
 
@@ -146,7 +174,7 @@ public class VarianTV301 {
      *
      * @return
      */
-    public int getCurrentErrorStatus() {
+    private int getCurrentErrorStatus() {
         writeRequestMsg(206);
         float f = readNumericValue();
         return (int) f;
@@ -157,7 +185,7 @@ public class VarianTV301 {
      *
      * @return Comapre with STATUS_.... definitions.
      */
-    public int getCurrentOperationStatus() {
+    private int getCurrentOperationStatus() {
         writeRequestMsg(205);
         float f = readNumericValue();
         return (int) f;
@@ -180,6 +208,21 @@ public class VarianTV301 {
 
         return sb.toString();
 
+    }
+
+
+    public boolean block () {
+        try {
+            return busy.tryAcquire(500, TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            log.error ("Error while reserving serial communication");
+        }
+        log.warn ("trying to reserve serial communication timed out.");
+        return false;
+    }
+
+    public void release () {
+        this.busy.release();
     }
 
 
@@ -277,6 +320,7 @@ public class VarianTV301 {
 
         } catch (IOException e) {
             log.error("While writing to Varian: ", e);
+            commError++;
         }
 
 
@@ -382,6 +426,7 @@ public class VarianTV301 {
 
         } catch (IOException e) {
             log.error("While reading in message from pump", e);
+            commError ++;
         }
 
         // For future use: sanity check on device address. IN case of RS242 we want to install a distibution of messages here.
